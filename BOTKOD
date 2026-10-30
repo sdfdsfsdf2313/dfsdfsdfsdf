@@ -296,9 +296,25 @@ async def on_paid(msg: Message):
     )
 
 # ===== ЗАПУСК =====
+from aiohttp import web
+
+async def handle(request):
+    return web.Response(text="Bot is running")
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get('/', handle)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', int(os.getenv("PORT", 8080)))
+    await site.start()
+
 async def main():
     await init_db()
     print("Бот запущен")
+    # Запускаем фейковый сервер для Render
+    asyncio.create_task(start_web_server())
+    # Запускаем самого бота
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
