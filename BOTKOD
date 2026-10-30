@@ -1,6 +1,7 @@
 # bot.py
 import os
 import asyncio
+import logging
 import aiosqlite
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import (
@@ -10,13 +11,11 @@ from aiogram.types import (
 )
 from aiogram.filters import CommandStart
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiohttp import web
 
 # ===== НАСТРОЙКИ =====
-BOT_TOKEN = os.getenv("8704721824:AAGwrlSUi5lU_PfanwUGknXrw3_MQUJgVNE")          # токен берётся из переменной окружения
-ADMIN_ID = int(os.getenv("5480678337
-
-
-", "0"))  # ваш Telegram ID тоже через переменную
+BOT_TOKEN = os.getenv("8704721824:AAGwrlSUi5lU_PfanwUGknXrw3_MQUJgVNE")          # из переменных окружения Render
+ADMIN_ID = int(os.getenv("5480678337", "0"))  # из переменных окружения Render
 DB_PATH = "shop.db"
 SHOP_CHANNEL = "https://t.me/LiggstipovShop"
 
@@ -26,6 +25,7 @@ PRODUCTS = {
     "vip":   {"name": "VIP-канал на месяц",     "price": 200, "link": "https://t.me/+..."},
 }
 
+logging.basicConfig(level=logging.INFO)
 bot = Bot(BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
@@ -295,26 +295,25 @@ async def on_paid(msg: Message):
         ])
     )
 
-# ===== ЗАПУСК =====
-from aiohttp import web
-
+# ===== ФЕЙКОВЫЙ ВЕБ-СЕРВЕР ДЛЯ RENDER =====
 async def handle(request):
     return web.Response(text="Bot is running")
 
 async def start_web_server():
     app = web.Application()
-    app.router.add_get('/', handle)
+    app.router.add_get("/", handle)
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', int(os.getenv("PORT", 8080)))
+    port = int(os.getenv("PORT", 8080))
+    site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
+    logging.info(f"Web server started on port {port}")
 
+# ===== ЗАПУСК =====
 async def main():
     await init_db()
     print("Бот запущен")
-    # Запускаем фейковый сервер для Render
-    asyncio.create_task(start_web_server())
-    # Запускаем самого бота
+    asyncio.create_task(start_web_server())  # чтобы Render не ругался на порты
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
