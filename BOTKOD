@@ -1,0 +1,305 @@
+# bot.py
+import os
+import asyncio
+import aiosqlite
+from aiogram import Bot, Dispatcher, F
+from aiogram.types import (
+    Message, CallbackQuery, PreCheckoutQuery,
+    InlineKeyboardMarkup, InlineKeyboardButton,
+    LabeledPrice,
+)
+from aiogram.filters import CommandStart
+from aiogram.fsm.storage.memory import MemoryStorage
+
+# ===== НАСТРОЙКИ =====
+BOT_TOKEN = os.getenv("8704721824:AAGwrlSUi5lU_PfanwUGknXrw3_MQUJgVNE")          # токен берётся из переменной окружения
+ADMIN_ID = int(os.getenv("5480678337
+
+
+", "0"))  # ваш Telegram ID тоже через переменную
+DB_PATH = "shop.db"
+SHOP_CHANNEL = "https://t.me/LiggstipovShop"
+
+PRODUCTS = {
+    "pack1": {"name": "Пак пресетов Lightroom", "price": 100, "link": "https://drive.google.com/..."},
+    "pack2": {"name": "Шаблоны Stories (30 шт)", "price": 50,  "link": "https://drive.google.com/..."},
+    "vip":   {"name": "VIP-канал на месяц",     "price": 200, "link": "https://t.me/+..."},
+}
+
+bot = Bot(BOT_TOKEN)
+dp = Dispatcher(storage=MemoryStorage())
+
+# ===== БАЗА ДАННЫХ =====
+async def init_db():
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.executescript("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                username TEXT,
+                referrer_id INTEGER,
+                ref_rewarded INTEGER DEFAULT 0,
+                stars_balance INTEGER DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS purchases (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                product_id TEXT,
+                amount INTEGER,
+                charge_id TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+        await db.commit()
+
+async def get_user(user_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT * FROM users WHERE user_id=?", (user_id,)) as cur:
+            return await cur.fetchone()
+
+async def create_user(user_id: int, username: str, referrer_id: int = None):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT OR IGNORE INTO users (user_id, username, referrer_id) VALUES (?,?,?)",
+            (user_id, username, referrer_id)
+        )
+        await db.commit()
+
+async def add_stars(user_id: int, amount: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE users SET stars_balance = stars_balance + ? WHERE user_id=?",
+            (amount, user_id)
+        )
+        await db.commit()
+
+async def save_purchase(user_id: int, product_id: str, amount: int, charge_id: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO purchases (user_id, product_id, amount, charge_id) VALUES (?,?,?,?)",
+            (user_id, product_id, amount, charge_id)
+        )
+        await db.commit()
+
+async def mark_ref_rewarded(user_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE users SET ref_rewarded=1 WHERE user_id=?", (user_id,))
+        await db.commit()
+
+# ===== КЛАВИАТУРЫ =====
+def main_menu():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🛍 Каталог", callback_data="catalog")],
+        [InlineKeyboardButton(text="📢 Наш канал-магазин", url=SHOP_CHANNEL)],
+        [InlineKeyboardButton(text="👥 Рефералка", callback_data="ref")],
+        [InlineKeyboardButton(text="💰 Мой баланс", callback_data="balance")],
+    ])
+
+def catalog_kb():
+    kb = []
+    for pid, p in PRODUCTS.items():
+        kb.append([InlineKeyboardButton(
+            text=f"{p['name']} — {p['price']} ⭐",
+            callback_data=f"view:{pid}"
+        )])
+    kb.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="main")])
+    return InlineKeyboardMarkup(inline_keyboard=kb)
+
+def product_kb(pid):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⭐ Купить за звёзды", callback_data=f"buy:{pid}")],
+        [InlineKeyboardButton(text="🛒 Купить в канале", url=SHOP_CHANNEL)],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="catalog")],
+    ])
+
+def invoice_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🛒 Или купить в канале", url=SHOP_CHANNEL)]
+    ])
+
+# ===== ИНВОЙС =====
+async def send_stars_invoice(chat_id: int, pid: str, buyer_id: int):
+    p = PRODUCTS[pid]
+    await bot.send_invoice(
+        chat_id=chat_id,
+        title=p["name"],
+        description=f"Цифровой товар: {p['name']}",
+        payload=f"order:{pid}:{buyer_id}",
+        provider_token="",
+        currency="XTR",
+        prices=[LabeledPrice(label=p["name"], amount=p["price"])],
+        start_parameter=f"buy_{pid}",
+        reply_markup=invoice_kb(),
+    )
+
+# ===== START =====
+@dp.message(CommandStart())
+async def start(msg: Message):
+    args = msg.text.split()
+
+    referrer_id = None
+    if len(args) > 1 and args[1].startswith("ref_"):
+        try:
+            rid = int(args[1].replace("ref_", ""))
+            if rid != msg.from_user.id:
+                referrer_id = rid
+        except ValueError:
+            pass
+
+    user = await get_user(msg.from_user.id)
+    if not user:
+        await create_user(msg.from_user.id, msg.from_user.username or "", referrer_id)
+        user = await get_user(msg.from_user.id)
+
+    balance = user[4] if user else 0
+
+    if len(args) > 1 and args[1].startswith("buy_"):
+        pid = args[1].replace("buy_", "")
+        if pid in PRODUCTS:
+            await msg.answer(
+                f"👋 Открываем оплату: <b>{PRODUCTS[pid]['name']}</b> за "
+                f"<b>{PRODUCTS[pid]['price']} ⭐</b>"
+            )
+            await send_stars_invoice(msg.chat.id, pid, msg.from_user.id)
+            return
+
+    await msg.answer(
+        f"👋 Добро пожаловать в <b>магазин</b>!\n\n"
+        f"💰 Ваш баланс: <b>{balance} ⭐</b>\n"
+        f"Оплата в Telegram Stars. Приглашайте друзей — получайте 10% с их покупок!",
+        reply_markup=main_menu()
+    )
+
+# ===== МЕНЮ =====
+@dp.callback_query(F.data == "main")
+async def main_cb(cb: CallbackQuery):
+    await cb.message.edit_text("Главное меню:", reply_markup=main_menu())
+    await cb.answer()
+
+@dp.callback_query(F.data == "catalog")
+async def catalog(cb: CallbackQuery):
+    await cb.message.edit_text("🛍 <b>Каталог:</b>", reply_markup=catalog_kb())
+    await cb.answer()
+
+@dp.callback_query(F.data.startswith("view:"))
+async def view(cb: CallbackQuery):
+    pid = cb.data.split(":")[1]
+    p = PRODUCTS[pid]
+    await cb.message.edit_text(
+        f"<b>{p['name']}</b>\n\n💰 Цена: <b>{p['price']} ⭐</b>",
+        reply_markup=product_kb(pid)
+    )
+    await cb.answer()
+
+@dp.callback_query(F.data == "ref")
+async def show_ref(cb: CallbackQuery):
+    me = await bot.get_me()
+    link = f"https://t.me/{me.username}?start=ref_{cb.from_user.id}"
+
+    rewarded_count = 0
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT COUNT(*) FROM users WHERE referrer_id=? AND ref_rewarded=1",
+            (cb.from_user.id,)
+        ) as cur:
+            row = await cur.fetchone()
+            rewarded_count = row[0] if row else 0
+
+    await cb.message.edit_text(
+        f"👥 <b>Реферальная программа</b>\n\n"
+        f"Приглашайте друзей по ссылке:\n<code>{link}</code>\n\n"
+        f"Вы получаете <b>10%</b> от суммы их первой покупки в звёздах ⭐\n\n"
+        f"✅ Приведено рефералов (с покупкой): <b>{rewarded_count}</b>",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="main")]
+        ])
+    )
+    await cb.answer()
+
+@dp.callback_query(F.data == "balance")
+async def show_balance(cb: CallbackQuery):
+    user = await get_user(cb.from_user.id)
+    bal = user[4] if user else 0
+    await cb.message.edit_text(
+        f"💰 <b>Ваш баланс:</b> {bal} ⭐\n\n"
+        f"Звёзды начисляются за рефералов. Для списания напишите в поддержку.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="main")]
+        ])
+    )
+    await cb.answer()
+
+@dp.callback_query(F.data.startswith("buy:"))
+async def buy(cb: CallbackQuery):
+    pid = cb.data.split(":")[1]
+    if pid not in PRODUCTS:
+        await cb.answer("Товар не найден", show_alert=True)
+        return
+    await send_stars_invoice(cb.from_user.id, pid, cb.from_user.id)
+    await cb.answer()
+
+# ===== ОПЛАТА =====
+@dp.pre_checkout_query()
+async def pre_checkout(q: PreCheckoutQuery):
+    await q.answer(ok=True)
+
+@dp.message(F.successful_payment)
+async def on_paid(msg: Message):
+    payment = msg.successful_payment
+    parts = payment.invoice_payload.split(":")
+    pid = parts[1]
+    buyer_id = int(parts[2])
+    amount = payment.total_amount
+
+    p = PRODUCTS.get(pid)
+    if not p:
+        await msg.answer("Ошибка: товар не найден. Напишите в поддержку.")
+        return
+
+    await save_purchase(buyer_id, pid, amount, payment.telegram_payment_charge_id)
+
+    await msg.answer(
+        f"✅ Спасибо за покупку!\n\n"
+        f"<b>{p['name']}</b>\n"
+        f"Ваша ссылка:\n{p['link']}",
+        reply_markup=main_menu()
+    )
+
+    user = await get_user(buyer_id)
+    if user and user[2] and user[3] == 0:
+        referrer_id = user[2]
+        reward = max(1, amount // 10)
+        await add_stars(referrer_id, reward)
+        await mark_ref_rewarded(buyer_id)
+        try:
+            await bot.send_message(
+                referrer_id,
+                f"🎉 Ваш реферал совершил покупку!\n"
+                f"Вам начислено <b>{reward} ⭐</b> на баланс."
+            )
+        except Exception:
+            pass
+
+    try:
+        await bot.send_message(
+            ADMIN_ID,
+            f"💰 Новая покупка: {p['name']} ({amount} ⭐)\n"
+            f"Покупатель: {buyer_id} (@{msg.from_user.username})"
+        )
+    except Exception:
+        pass
+
+    await msg.answer(
+        "📢 Загляните в наш канал-магазин — там новинки и акции:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Перейти в канал", url=SHOP_CHANNEL)]
+        ])
+    )
+
+# ===== ЗАПУСК =====
+async def main():
+    await init_db()
+    print("Бот запущен")
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
